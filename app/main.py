@@ -25,15 +25,19 @@ def encode_domain_name(domain):
 
 def parse_dns_packet(data):
     header = struct.unpack('!HHHHHH', data[:12])
+    id = header[0]
+    flags = header[1]
+    opcode = (flags >> 11) & 0xF  # Extract opcode from flags
+    header = (id, flags, opcode) + header[2:]  # Include opcode in header tuple
     offset = 12
     questions = []
     answers = []
-    for _ in range(header[2]):  # QDCOUNT
+    for _ in range(header[3]):  # QDCOUNT
         domain, offset = decode_domain_name(data, offset)
         qtype, qclass = struct.unpack('!HH', data[offset:offset+4])
         offset += 4
         questions.append((domain, qtype, qclass))
-    for _ in range(header[3]):  # ANCOUNT
+    for _ in range(header[4]):  # ANCOUNT
         domain, offset = decode_domain_name(data, offset)
         atype, aclass, ttl, rdlength = struct.unpack('!HHIH', data[offset:offset+10])
         offset += 10
@@ -42,8 +46,9 @@ def parse_dns_packet(data):
         answers.append((domain, atype, aclass, ttl, rdata))
     return header, questions, answers
 
-def create_query(id, domain, record_type):
-    header = struct.pack('!HHHHHH', id, 0x0100, 1, 0, 0, 0)
+def create_query(id, domain, record_type, opcode):
+    flags = (opcode << 11) | 0x0100  # Set opcode and RD flag
+    header = struct.pack('!HHHHHH', id, flags, 1, 0, 0, 0)
     question = encode_domain_name(domain) + struct.pack('!HH', record_type, 1)
     return header + question
 
@@ -55,26 +60,27 @@ def forward_dns_query(resolver, query):
 def main(resolver_address):
     resolver_ip, resolver_port = resolver_address.split(':')
     resolver = (resolver_ip, int(resolver_port))
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(('127.0.0.1', 2053))
-
+    
     while True:
         data, addr = sock.recvfrom(512)
         header, questions, _ = parse_dns_packet(data)
         
         id = header[0]
+        opcode = header[2]
         all_answers = []
         
         for domain, qtype, qclass in questions:
-            query = create_query(id, domain, qtype)
+            query = create_query(id, domain, qtype, opcode)
             forwarded_response = forward_dns_query(resolver, query)
             _, _, answers = parse_dns_packet(forwarded_response)
             all_answers.extend(answers)
 
-        response_header = struct.pack('!HHHHHH', 
+        response_flags = 0x8180 | (opcode << 11)  # QR=1, AA=0, TC=0, RD=1, RA=1, Z=0, RCODE=0, and set opcode
+        response_header = struct.pack('!HHHHHH',
             id,           # ID
-            0x8180,       # Flags: QR=1, AA=0, TC=0, RD=1, RA=1, Z=0, RCODE=0
+            response_flags,  # Flags
             len(questions),  # QDCOUNT
             len(all_answers),  # ANCOUNT
             0,            # NSCOUNT
@@ -85,7 +91,7 @@ def main(resolver_address):
         response_answers = b''
         for domain, atype, aclass, ttl, rdata in all_answers:
             response_answers += encode_domain_name(domain) + struct.pack('!HHIH', atype, aclass, ttl, len(rdata)) + rdata
-
+        
         response = response_header + response_questions + response_answers
         sock.sendto(response, addr)
 
