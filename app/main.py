@@ -78,12 +78,33 @@ def main(resolver):
             buf, source = udp_socket.recvfrom(512)
             packet = DNSPacket.parse_from_bytes(buf)
 
-            # Forward the query to the resolver
-            resolver_socket.sendto(buf, resolver_addr)
-            response, _ = resolver_socket.recvfrom(512)
+            # Handle multiple queries
+            combined_response = b""
+            for q in packet.qd:
+                domain, record_type, record_class = q
+                query = struct.pack("!hBBhhhh", packet.identifier, 0, packet.rd, 1, 0, 0, 0)
+                query += question_section(domain, record_type, record_class)
 
-            # Send the response back to the original requester
-            udp_socket.sendto(response, source)
+                # Forward the query to the resolver
+                resolver_socket.sendto(query, resolver_addr)
+                response, _ = resolver_socket.recvfrom(512)
+
+                # Extract answer section from the response
+                response_packet = DNSPacket.parse_from_bytes(response)
+                combined_response += response[12:]  # Skip header
+
+            # Construct the combined response
+            header = struct.pack("!hBBhhhh", 
+                packet.identifier,
+                0x80 | (packet.opcode << 3) | packet.rd,  # QR=1, Opcode, RD
+                0,  # RA=0, Z=0, RCODE=0
+                len(packet.qd),
+                len(packet.qd),  # ANCOUNT = number of questions
+                0, 0
+            )
+
+            full_response = header + buf[12:] + combined_response  # Original questions + combined answers
+            udp_socket.sendto(full_response, source)
 
         except Exception as e:
             print(f"Error: {e}")
