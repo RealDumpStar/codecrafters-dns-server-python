@@ -1,6 +1,6 @@
 import socket
-import sys
 import argparse
+import struct
 
 def encode_domain_name(domain):
     labels = domain.split('.')
@@ -27,47 +27,57 @@ def decode_domain_name(data, offset):
             offset += length
     return '.'.join(labels), offset + 1  # Skip the null byte
 
+def forward_dns_query(resolver, query):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.sendto(query, resolver)
+        response, _ = sock.recvfrom(512)
+    return response
+
 def main():
-    parser = argparse.ArgumentParser(description='Forwarding DNS Server')
-    parser.add_argument('--resolver', required=True, help='The resolver address in the form <ip>:<port>')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resolver', required=True, help='Resolver address in format <ip>:<port>')
     args = parser.parse_args()
 
     resolver_ip, resolver_port = args.resolver.split(':')
-    resolver_port = int(resolver_port)
+    resolver = (resolver_ip, int(resolver_port))
 
-    # Initialize and bind the UDP socket
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.bind(("127.0.0.1", 2053))
 
     while True:
         try:
-            buf, source = udp_socket.recvfrom(512)
-            id_bytes = buf[:2]  # Extract the ID from the query packet
+            query, source = udp_socket.recvfrom(512)
+            
+            # Extract query details
+            id_bytes = query[:2]
+            qdcount = struct.unpack('!H', query[4:6])[0]
 
-            # Forward the received query to the specified resolver
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as resolver_socket:
-                resolver_socket.sendto(buf, (resolver_ip, resolver_port))
-                resolver_response, _ = resolver_socket.recvfrom(512)
+            # If multiple questions, split and process separately
+            if qdcount > 1:
+                responses = []
+                offset = 12
+                for _ in range(qdcount):
+                    domain_name, offset = decode_domain_name(query, offset)
+                    qtype = query[offset:offset+2]
+                    qclass = query[offset+2:offset+4]
+                    offset += 4
 
-            # Extract parts from the resolver's response
-            response_header = resolver_response[:12]
-            question_section_offset = 12
-            question_section = buf[question_section_offset:]  # Use the original question section
-            answer_section_offset = question_section_offset + len(question_section)
+                    single_query = id_bytes + query[2:4] + struct.pack('!H', 1) + query[6:12] + \
+                                   encode_domain_name(domain_name) + qtype + qclass
 
-            # Construct the full response packet
-            response_packet = (
-                id_bytes +
-                response_header[2:12] +  # Use the rest of the header from the resolver's response
-                question_section +
-                resolver_response[answer_section_offset:]  # Append the answer section from the resolver's response
-            )
+                    response = forward_dns_query(resolver, single_query)
+                    responses.append(response[12:])  # Exclude header
 
-            # Send the response to the source address
-            udp_socket.sendto(response_packet, source)
+                # Combine responses
+                combined_response = id_bytes + query[2:4] + struct.pack('!H', qdcount) + \
+                                    struct.pack('!H', qdcount) + b'\x00\x00\x00\x00' + b''.join(responses)
+            else:
+                combined_response = forward_dns_query(resolver, query)
+
+            udp_socket.sendto(combined_response, source)
 
         except Exception as e:
-            print(f"Error receiving data: {e}")
+            print(f"Error: {e}")
             break
 
 if __name__ == "__main__":
