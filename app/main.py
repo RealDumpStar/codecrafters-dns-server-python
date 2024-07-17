@@ -1,5 +1,14 @@
 import socket
 
+def encode_domain_name(domain):
+    labels = domain.split('.')
+    encoded_labels = []
+    for label in labels:
+        encoded_labels.append(len(label).to_bytes(1, byteorder='big'))
+        encoded_labels.append(label.encode('ascii'))
+    encoded_labels.append(b'\x00')  # Null byte to terminate the domain name
+    return b''.join(encoded_labels)
+
 def main():
     # Debugging logs
     print("Logs from your program will appear here!")
@@ -20,8 +29,8 @@ def main():
             flags = (1 << 15)  # QR = 1 << 15 (setting the QR bit)
             flags_bytes = flags.to_bytes(2, byteorder='big')
             
-            # Question Count (QDCOUNT) = 0 (16 bits)
-            qdcount_bytes = (0).to_bytes(2, byteorder='big')
+            # Question Count (QDCOUNT) = 1 (16 bits)
+            qdcount_bytes = (1).to_bytes(2, byteorder='big')
             
             # Answer Record Count (ANCOUNT) = 0 (16 bits)
             ancount_bytes = (0).to_bytes(2, byteorder='big')
@@ -41,6 +50,22 @@ def main():
                 nscount_bytes +
                 arcount_bytes
             )
+
+            # Construct the question section
+            domain_name = "codecrafters.io"
+            encoded_domain_name = encode_domain_name(domain_name)
+            
+            # Type (2 bytes, big-endian) - 1 for A record
+            qtype = (1).to_bytes(2, byteorder='big')
+            
+            # Class (2 bytes, big-endian) - 1 for IN (Internet)
+            qclass = (1).to_bytes(2, byteorder='big')
+            
+            # Combine to form the question section
+            question_section = encoded_domain_name + qtype + qclass
+            
+            # Append the question section to the response
+            response += question_section
 
             # Send the response to the source address
             udp_socket.sendto(response, source)
