@@ -13,14 +13,16 @@ def encode_domain_name(domain):
 
 def decode_domain_name(data, offset):
     labels = []
-    while data[offset] != 0:
+    original_offset = offset
+    while True:
         length = data[offset]
+        if length == 0:
+            break
         if length & 0xC0 == 0xC0:  # Pointer (compression)
-            pointer = ((length & 0x3F) << 8) | data[offset + 1]
-            decoded_label, _ = decode_domain_name(data, pointer)
-            labels.append(decoded_label)
-            offset += 2
-            return '.'.join(labels), offset
+            pointer = struct.unpack('!H', data[offset:offset+2])[0] & 0x3FFF
+            if pointer >= original_offset:
+                raise ValueError("Invalid pointer in compressed name")
+            return decode_domain_name(data, pointer)[0], offset + 2
         else:
             offset += 1
             labels.append(data[offset:offset+length].decode('ascii'))
@@ -32,6 +34,11 @@ def forward_dns_query(resolver, query):
         sock.sendto(query, resolver)
         response, _ = sock.recvfrom(512)
     return response
+
+def parse_question(data, offset):
+    domain, offset = decode_domain_name(data, offset)
+    qtype, qclass = struct.unpack('!HH', data[offset:offset+4])
+    return domain, qtype, qclass, offset + 4
 
 def main():
     parser = argparse.ArgumentParser()
@@ -50,29 +57,27 @@ def main():
             
             # Extract query details
             id_bytes = query[:2]
-            qdcount = struct.unpack('!H', query[4:6])[0]
+            flags, qdcount = struct.unpack('!HH', query[2:6])
 
-            # If multiple questions, split and process separately
-            if qdcount > 1:
-                responses = []
-                offset = 12
-                for _ in range(qdcount):
-                    domain_name, offset = decode_domain_name(query, offset)
-                    qtype = query[offset:offset+2]
-                    qclass = query[offset+2:offset+4]
-                    offset += 4
+            # Parse questions
+            offset = 12
+            questions = []
+            for _ in range(qdcount):
+                domain, qtype, qclass, offset = parse_question(query, offset)
+                questions.append((domain, qtype, qclass))
 
-                    single_query = id_bytes + query[2:4] + struct.pack('!H', 1) + query[6:12] + \
-                                   encode_domain_name(domain_name) + qtype + qclass
+            # Forward each question separately and collect responses
+            responses = []
+            for domain, qtype, qclass in questions:
+                single_query = id_bytes + struct.pack('!HHHHHH', flags, 1, 0, 0, 0, 0) + \
+                               encode_domain_name(domain) + struct.pack('!HH', qtype, qclass)
+                response = forward_dns_query(resolver, single_query)
+                responses.append(response[12:])  # Exclude header
 
-                    response = forward_dns_query(resolver, single_query)
-                    responses.append(response[12:])  # Exclude header
-
-                # Combine responses
-                combined_response = id_bytes + query[2:4] + struct.pack('!H', qdcount) + \
-                                    struct.pack('!H', qdcount) + b'\x00\x00\x00\x00' + b''.join(responses)
-            else:
-                combined_response = forward_dns_query(resolver, query)
+            # Combine responses
+            combined_response = id_bytes + struct.pack('!HHHHHH', 
+                flags | 0x8000,  # Set QR bit to 1 (response)
+                qdcount, qdcount, 0, 0, 0) + query[12:offset] + b''.join(responses)
 
             udp_socket.sendto(combined_response, source)
 
