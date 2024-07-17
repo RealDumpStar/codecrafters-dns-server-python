@@ -23,20 +23,28 @@ def main():
             
             # Parse the incoming DNS query packet
             id_bytes = buf[:2]  # Extract the ID from the query packet
-
+            flags1 = buf[2]
+            flags2 = buf[3]
+            
             # Construct the response header based on the given specifications
-            flags = (1 << 15)  # QR = 1 << 15 (setting the QR bit)
-            opcode = 0b1000000  # Set OPCODE to 1 (standard query)
-            rd = (buf[2] & 0b00000001)  # Extract and mimic the RD bit
+            qr = 1 << 7  # QR = 1
+            opcode = (flags1 & 0b01111000) >> 3  # Extract and mimic the OPCODE
+            aa = 0 << 2  # AA = 0
+            tc = 0 << 1  # TC = 0
+            rd = flags1 & 0b00000001  # Extract and mimic the RD bit
             
             if opcode == 0:
                 rcode = 0  # Response code 0 (no error) for standard query
             else:
                 rcode = 4  # Response code 4 (not implemented) for other OPCODEs
             
-            flags |= (rd << 8)  # Set the RD bit in the flags
+            ra = 0 << 7  # RA = 0
+            z = 0 << 4  # Z = 0
             
-            flags_bytes = flags.to_bytes(2, byteorder='big')
+            flags1 = qr | (opcode << 3) | aa | tc | rd
+            flags2 = ra | z | rcode
+            
+            flags_bytes = bytes([flags1, flags2])
             qdcount_bytes = buf[4:6]  # QDCOUNT from the query packet
             ancount_bytes = (1).to_bytes(2, byteorder='big')  # ANCOUNT = 1 (one answer)
             nscount_bytes = (0).to_bytes(2, byteorder='big')
@@ -52,20 +60,18 @@ def main():
                 arcount_bytes
             )
 
-            # Construct the question section
-            domain_name = "codecrafters.io"
-            encoded_domain_name = encode_domain_name(domain_name)
-            qtype = (1).to_bytes(2, byteorder='big')  # Type A record
-            qclass = (1).to_bytes(2, byteorder='big')  # Class IN (Internet)
-            question_section = encoded_domain_name + qtype + qclass
-            
+            # Construct the question section (copy from the request)
+            question_section = buf[12:]
+
             # Append the question section to the response
             response += question_section
 
             # Construct the answer section
+            domain_name = "codecrafters.io"
+            encoded_domain_name = encode_domain_name(domain_name)
             answer_name = encoded_domain_name  # Same as in the question section
-            answer_type = qtype  # Type A record
-            answer_class = qclass  # Class IN (Internet)
+            answer_type = (1).to_bytes(2, byteorder='big')  # Type A record
+            answer_class = (1).to_bytes(2, byteorder='big')  # Class IN (Internet)
             ttl = (60).to_bytes(4, byteorder='big')  # TTL = 60 seconds
             rdlength = (4).to_bytes(2, byteorder='big')  # Length of RDATA field
             ip_address = socket.inet_aton('8.8.8.8')  # Convert IP address to 4-byte format
