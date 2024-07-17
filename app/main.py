@@ -1,4 +1,6 @@
 import socket
+import sys
+import argparse
 
 def encode_domain_name(domain):
     labels = domain.split('.')
@@ -26,8 +28,12 @@ def decode_domain_name(data, offset):
     return '.'.join(labels), offset + 1  # Skip the null byte
 
 def main():
-    # Debugging logs
-    print("Logs from your program will appear here!")
+    parser = argparse.ArgumentParser(description='Forwarding DNS Server')
+    parser.add_argument('--resolver', required=True, help='The resolver address in the form <ip>:<port>')
+    args = parser.parse_args()
+
+    resolver_ip, resolver_port = args.resolver.split(':')
+    resolver_port = int(resolver_port)
 
     # Initialize and bind the UDP socket
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -36,84 +42,30 @@ def main():
     while True:
         try:
             buf, source = udp_socket.recvfrom(512)
-            
-            # Parse the incoming DNS query packet
             id_bytes = buf[:2]  # Extract the ID from the query packet
-            
-            # Extract flags and other header fields from the query packet
-            flags1 = buf[2]
-            flags2 = buf[3]
-            opcode = (flags1 & 0b01111000) >> 3  # Extract and mimic the OPCODE
-            rd = (flags1 & 0b00000001)  # Extract and mimic the RD bit
 
-            # Construct the response flags
-            qr = 1 << 7  # QR = 1 (response)
-            aa = 0 << 2  # AA = 0 (not authoritative)
-            tc = 0 << 1  # TC = 0 (not truncated)
-            ra = 0 << 7  # RA = 0 (recursion not available)
-            z = 0 << 4   # Z = 0 (reserved)
-            
-            if opcode == 0:
-                rcode = 0  # Response code 0 (no error) for standard query
-            else:
-                rcode = 4  # Response code 4 (not implemented) for other OPCODEs
+            # Forward the received query to the specified resolver
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as resolver_socket:
+                resolver_socket.sendto(buf, (resolver_ip, resolver_port))
+                resolver_response, _ = resolver_socket.recvfrom(512)
 
-            flags1 = qr | (opcode << 3) | aa | tc | rd
-            flags2 = ra | z | rcode
-            flags_bytes = bytes([flags1, flags2])
+            # Extract parts from the resolver's response
+            response_header = resolver_response[:12]
+            question_section_offset = 12
+            question_section = buf[question_section_offset:]  # Use the original question section
+            answer_section_offset = question_section_offset + len(question_section)
 
-            qdcount_bytes = buf[4:6]  # QDCOUNT from the query packet
-            qdcount = int.from_bytes(qdcount_bytes, byteorder='big')
-            ancount_bytes = qdcount_bytes  # ANCOUNT = same as QDCOUNT (one answer per question)
-            nscount_bytes = (0).to_bytes(2, byteorder='big')
-            arcount_bytes = (0).to_bytes(2, byteorder='big')
-            
-            # Combine all parts to form the 12-byte header
-            response_header = (
+            # Construct the full response packet
+            response_packet = (
                 id_bytes +
-                flags_bytes +
-                qdcount_bytes +
-                ancount_bytes +
-                nscount_bytes +
-                arcount_bytes
+                response_header[2:12] +  # Use the rest of the header from the resolver's response
+                question_section +
+                resolver_response[answer_section_offset:]  # Append the answer section from the resolver's response
             )
 
-            # Parse the question section from the query packet
-            offset = 12  # Question section starts immediately after the 12-byte header
-            question_sections = []
-            domains = []
-            
-            for _ in range(qdcount):
-                domain_name, offset = decode_domain_name(buf, offset)
-                qtype = buf[offset:offset+2]
-                qclass = buf[offset+2:offset+4]
-                question_sections.append(encode_domain_name(domain_name) + qtype + qclass)
-                domains.append(domain_name)
-                offset += 4
-
-            question_section = b''.join(question_sections)
-
-            # Construct the answer sections
-            answer_sections = []
-            for domain_name in domains:
-                answer_name = encode_domain_name(domain_name)  # Same as in the question section
-                answer_type = (1).to_bytes(2, byteorder='big')  # Type A record
-                answer_class = (1).to_bytes(2, byteorder='big')  # Class IN (Internet)
-                ttl = (60).to_bytes(4, byteorder='big')  # TTL = 60 seconds
-                rdlength = (4).to_bytes(2, byteorder='big')  # Length of RDATA field
-                ip_address = socket.inet_aton('8.8.8.8')  # Convert IP address to 4-byte format
-                rdata = ip_address
-                
-                answer_section = answer_name + answer_type + answer_class + ttl + rdlength + rdata
-                answer_sections.append(answer_section)
-
-            answer_section = b''.join(answer_sections)
-            
-            # Combine the header, question, and answer sections to form the complete response
-            response = response_header + question_section + answer_section
-
             # Send the response to the source address
-            udp_socket.sendto(response, source)
+            udp_socket.sendto(response_packet, source)
+
         except Exception as e:
             print(f"Error receiving data: {e}")
             break
