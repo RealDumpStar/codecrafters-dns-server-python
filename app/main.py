@@ -22,23 +22,12 @@ def main():
             buf, source = udp_socket.recvfrom(512)
             
             # Construct the response header based on the given specifications
-            # Packet Identifier (ID) = 1234 (16 bits)
             id_bytes = (1234).to_bytes(2, byteorder='big')
-            
-            # Flags (16 bits) - QR: 1, OPCODE: 0, AA: 0, TC: 0, RD: 0, RA: 0, Z: 0, RCODE: 0
             flags = (1 << 15)  # QR = 1 << 15 (setting the QR bit)
             flags_bytes = flags.to_bytes(2, byteorder='big')
-            
-            # Question Count (QDCOUNT) = 1 (16 bits)
-            qdcount_bytes = (1).to_bytes(2, byteorder='big')
-            
-            # Answer Record Count (ANCOUNT) = 0 (16 bits)
-            ancount_bytes = (0).to_bytes(2, byteorder='big')
-            
-            # Authority Record Count (NSCOUNT) = 0 (16 bits)
+            qdcount_bytes = (1).to_bytes(2, byteorder='big')  # QDCOUNT = 1 (one question)
+            ancount_bytes = (1).to_bytes(2, byteorder='big')  # ANCOUNT = 1 (one answer)
             nscount_bytes = (0).to_bytes(2, byteorder='big')
-            
-            # Additional Record Count (ARCOUNT) = 0 (16 bits)
             arcount_bytes = (0).to_bytes(2, byteorder='big')
             
             # Combine all parts to form the 12-byte header
@@ -54,18 +43,26 @@ def main():
             # Construct the question section
             domain_name = "codecrafters.io"
             encoded_domain_name = encode_domain_name(domain_name)
-            
-            # Type (2 bytes, big-endian) - 1 for A record
-            qtype = (1).to_bytes(2, byteorder='big')
-            
-            # Class (2 bytes, big-endian) - 1 for IN (Internet)
-            qclass = (1).to_bytes(2, byteorder='big')
-            
-            # Combine to form the question section
+            qtype = (1).to_bytes(2, byteorder='big')  # Type A record
+            qclass = (1).to_bytes(2, byteorder='big')  # Class IN (Internet)
             question_section = encoded_domain_name + qtype + qclass
             
             # Append the question section to the response
             response += question_section
+
+            # Construct the answer section
+            answer_name = encoded_domain_name  # Same as in the question section
+            answer_type = qtype  # Type A record
+            answer_class = qclass  # Class IN (Internet)
+            ttl = (60).to_bytes(4, byteorder='big')  # TTL = 60 seconds
+            rdlength = (4).to_bytes(2, byteorder='big')  # Length of RDATA field
+            ip_address = socket.inet_aton('8.8.8.8')  # Convert IP address to 4-byte format
+            rdata = ip_address
+            
+            answer_section = answer_name + answer_type + answer_class + ttl + rdlength + rdata
+            
+            # Append the answer section to the response
+            response += answer_section
 
             # Send the response to the source address
             udp_socket.sendto(response, source)
