@@ -1,109 +1,389 @@
+import argparse
+
 import socket
-import sys
+
 import struct
 
-def decode_domain_name(data, offset):
-    labels = []
-    original_offset = offset
-    while True:
-        length = data[offset]
-        if length == 0:
-            return '.'.join(labels), offset + 1
-        elif length & 0xC0 == 0xC0:
-            pointer = struct.unpack('!H', data[offset:offset+2])[0] & 0x3FFF
-            if pointer >= original_offset:
-                raise ValueError("Invalid pointer in compressed name")
-            suffix, _ = decode_domain_name(data, pointer)
-            return '.'.join(labels) + '.' + suffix, offset + 2
+from dataclasses import dataclass
+
+@dataclass
+
+class DNSHeader:
+
+    id_: int
+
+    qr: int
+
+    opcode: int
+
+    aa: int
+
+    tc: int
+
+    rd: int
+
+    ra: int
+
+    z: int
+
+    rcode: int
+
+    qdcount: int
+
+    ancount: int
+
+    nscount: int
+
+    arcount: int
+
+    def pack(self) -> bytes:
+
+        flags = (
+
+            (self.qr << 15)
+
+            | (self.opcode << 11)
+
+            | (self.aa << 10)
+
+            | (self.tc << 9)
+
+            | (self.rd << 8)
+
+            | (self.ra << 7)
+
+            | (self.z << 4)
+
+            | self.rcode
+
+        )
+
+        return struct.pack(
+
+            ">HHHHHH",
+
+            self.id_,
+
+            flags,
+
+            self.qdcount,
+
+            self.ancount,
+
+            self.nscount,
+
+            self.arcount,
+
+        )
+
+    @classmethod
+
+    def unpack(cls, data: bytes):
+
+        id_, flags, qdcount, ancount, nscount, arcount = struct.unpack(">HHHHHH", data)
+
+        qr = flags >> 15
+
+        opcode = (flags >> 11) & 0b1111
+
+        aa = (flags >> 10) & 0b1
+
+        tc = (flags >> 9) & 0b1
+
+        rd = (flags >> 8) & 0b1
+
+        ra = (flags >> 7) & 0b1
+
+        z = (flags >> 4) & 0b111
+
+        rcode = flags & 0b1111
+
+        return cls(
+
+            id_,
+
+            qr,
+
+            opcode,
+
+            aa,
+
+            tc,
+
+            rd,
+
+            ra,
+
+            z,
+
+            rcode,
+
+            qdcount,
+
+            ancount,
+
+            nscount,
+
+            arcount,
+
+        )
+
+@dataclass
+
+class DNSQuestion:
+
+    name: str
+
+    type_: int
+
+    class_: int
+
+    def pack(self):
+
+        name = (
+
+            b"".join(
+
+                len(p).to_bytes(1, "big") + p.encode("ascii")
+
+                for p in self.name.split(".")
+
+            )
+
+            + b"\x00"
+
+        )
+
+        return name + struct.pack("!HH", self.type_, self.class_)
+
+    @classmethod
+
+    def unpack(cls, data: bytes, payload: bytes):
+
+        parts = []
+
+        while True:
+
+            length = data[0]
+
+            if length == 0:
+
+                data = data[1:]
+
+                break
+
+            elif (
+
+                length & 0b11000000 == 0b11000000
+
+            ):  # Check if the first two bits are set
+
+                pointer = struct.unpack("!H", data[:2])[0]
+
+                pointer &= 0b0011111111111111  # Clear the first two bits
+
+                data = data[2:]
+
+                name = cls.unpack(payload[pointer:], payload)[0].name
+
+                parts.append(name)
+
+                return cls(".".join(parts), *struct.unpack("!HH", data[:4])), data[4:]
+
+            else:
+
+                parts.append(data[1 : length + 1].decode("ascii"))
+
+                data = data[length + 1 :]
+
+        name = ".".join(parts)
+
+        type_, class_ = struct.unpack("!HH", data[:4])
+
+        data = data[4:]
+
+        return cls(name, type_, class_), data
+
+@dataclass
+
+class DNSAnswer:
+
+    name: str
+
+    type_: int
+
+    class_: int
+
+    ttl: int
+
+    rdlength: int
+
+    rdata: str
+
+    def pack(self):
+
+        parts = self.name.split(".")
+
+        name = b"".join(len(p).to_bytes(1, "big") + p.encode("ascii") for p in parts)
+
+        name += b"\x00"
+
+        rdata = struct.pack("!BBBB", *[int(part) for part in self.rdata.split(".")])
+
+        return (
+
+            name
+
+            + struct.pack("!HHIH", self.type_, self.class_, self.ttl, self.rdlength)
+
+            + rdata
+
+        )
+
+@dataclass
+
+class DNSQuery:
+
+    header: DNSHeader
+
+    questions: list[DNSQuestion]
+
+    @classmethod
+
+    def parse(cls, payload):
+
+        header = DNSHeader.unpack(payload[:12])
+
+        questions: list[DNSQuestion] = []
+
+        unprocessed = payload[12:]
+
+        for _ in range(header.qdcount):
+
+            question, unprocessed = DNSQuestion.unpack(unprocessed, payload)
+
+            questions.append(question)
+
+        return cls(header, questions)
+
+class DNSResponse:
+
+    @staticmethod
+    def build_from(query: DNSQuery, resolver):
+
+        response = b""
+
+        response += DNSHeader(
+
+            id_=query.header.id_,
+
+            qr=1,
+
+            opcode=query.header.opcode,
+
+            aa=0,
+
+            tc=0,
+
+            rd=query.header.rd,
+
+            ra=0,
+
+            z=0,
+
+            rcode=(0 if query.header.opcode == 0 else 4),
+
+            qdcount=query.header.qdcount,
+
+            ancount=query.header.qdcount,
+
+            nscount=0,
+
+            arcount=0,
+
+        ).pack()
+
+        for question in query.questions:
+
+            response += question.pack()
+
+        if resolver is None:
+
+            for question in query.questions:
+
+                response += DNSAnswer(
+
+                    name=question.name,
+
+                    type_=1,
+
+                    class_=1,
+
+                    ttl=60,
+
+                    rdlength=4,
+
+                    rdata="8.8.8.8",
+
+                ).pack()
+
         else:
-            offset += 1
-            labels.append(data[offset:offset+length].decode('ascii'))
-            offset += length
 
-def encode_domain_name(domain):
-    return b''.join(struct.pack('B', len(label)) + label.encode('ascii') for label in domain.split('.')) + b'\x00'
+            ip, port = resolver.split(":")
 
-def parse_dns_packet(data):
-    header = struct.unpack('!HHHHHH', data[:12])
-    id = header[0]
-    flags = header[1]
-    opcode = (flags >> 11) & 0xF  # Extract opcode from flags
-    header = (id, flags, opcode) + header[2:]  # Include opcode in header tuple
-    offset = 12
-    questions = []
-    answers = []
-    for _ in range(header[3]):  # QDCOUNT
-        domain, offset = decode_domain_name(data, offset)
-        qtype, qclass = struct.unpack('!HH', data[offset:offset+4])
-        offset += 4
-        questions.append((domain, qtype, qclass))
-    for _ in range(header[4]):  # ANCOUNT
-        domain, offset = decode_domain_name(data, offset)
-        atype, aclass, ttl, rdlength = struct.unpack('!HHIH', data[offset:offset+10])
-        offset += 10
-        rdata = data[offset:offset+rdlength]
-        offset += rdlength
-        answers.append((domain, atype, aclass, ttl, rdata))
-    return header, questions, answers
+            port = int(port)
 
-def create_query(id, domain, record_type, opcode):
-    flags = (opcode << 11) | 0x0100  # Set opcode and RD flag
-    header = struct.pack('!HHHHHH', id, flags, 1, 0, 0, 0)
-    question = encode_domain_name(domain) + struct.pack('!HH', record_type, 1)
-    return header + question
+            dns_resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-def create_response(id, opcode, questions, answers, rcode=0):
-    response_flags = 0x8000 | (opcode << 11) | (1 << 8) | (1 << 7) | rcode  # QR=1, AA=0, TC=0, RD=1, RA=1, Z=0, RCODE=rcode
-    response_header = struct.pack('!HHHHHH',
-        id,           # ID
-        response_flags,  # Flags
-        len(questions),  # QDCOUNT
-        len(answers),  # ANCOUNT
-        0,            # NSCOUNT
-        0             # ARCOUNT
-    )
-    
-    response_questions = b''.join(encode_domain_name(q[0]) + struct.pack('!HH', q[1], q[2]) for q in questions)
-    response_answers = b''
-    for domain, atype, aclass, ttl, rdata in answers:
-        response_answers += encode_domain_name(domain) + struct.pack('!HHIH', atype, aclass, ttl, len(rdata)) + rdata
-    
-    return response_header + response_questions + response_answers
+            query.header.qdcount = 1
 
-def forward_dns_query(resolver, query):
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.sendto(query, resolver)
-        return sock.recvfrom(512)[0]
+            for question in query.questions:
 
-def main(resolver_address):
-    resolver_ip, resolver_port = resolver_address.split(':')
-    resolver = (resolver_ip, int(resolver_port))
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('127.0.0.1', 2053))
-    
+                query_data = query.header.pack() + question.pack()
+
+                dns_resolver.sendto(query_data, (ip, port))
+
+                dns_resolver_response, _ = dns_resolver.recvfrom(512)
+
+                # We are skipping 4 bytes for the type and class fields
+
+                answer_offset = dns_resolver_response.index(b"\x00", 12) + 5
+
+                response += dns_resolver_response[answer_offset:]
+
+            dns_resolver.close()
+
+        return response
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--resolver", help="IP address of the resolver")
+
+    args = parser.parse_args()
+
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    udp_socket.bind(("127.0.0.1", 2053))
+
     while True:
-        data, addr = sock.recvfrom(512)
-        header, questions, _ = parse_dns_packet(data)
-        
-        id = header[0]
-        opcode = header[2]
-        
-        if opcode == 1:  # IQUERY
-            # IQUERY is obsolete, respond with RCODE 4 (Not Implemented)
-            response = create_response(id, opcode, questions, [], rcode=4)
-        else:
-            all_answers = []
-            for domain, qtype, qclass in questions:
-                query = create_query(id, domain, qtype, opcode)
-                forwarded_response = forward_dns_query(resolver, query)
-                _, _, answers = parse_dns_packet(forwarded_response)
-                all_answers.extend(answers)
-            response = create_response(id, opcode, questions, all_answers)
-        
-        sock.sendto(response, addr)
+
+        try:
+            data, source = udp_socket.recvfrom(512)
+
+            query = DNSQuery.parse(data)
+
+            response = DNSResponse.build_from(query, args.resolver)
+
+            udp_socket.sendto(response, source)
+
+        except Exception as e:
+
+            print(f"Error receiving data: {e}")
+
+            break
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] != '--resolver':
-        print("Usage: python dns_forwarder.py --resolver <ip>:<port>")
-        sys.exit(1)
-    main(sys.argv[2])
+
+    main()
