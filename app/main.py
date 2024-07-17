@@ -52,6 +52,24 @@ def create_query(id, domain, record_type, opcode):
     question = encode_domain_name(domain) + struct.pack('!HH', record_type, 1)
     return header + question
 
+def create_response(id, opcode, questions, answers, rcode=0):
+    response_flags = 0x8000 | (opcode << 11) | (1 << 8) | (1 << 7) | rcode  # QR=1, AA=0, TC=0, RD=1, RA=1, Z=0, RCODE=rcode
+    response_header = struct.pack('!HHHHHH',
+        id,           # ID
+        response_flags,  # Flags
+        len(questions),  # QDCOUNT
+        len(answers),  # ANCOUNT
+        0,            # NSCOUNT
+        0             # ARCOUNT
+    )
+    
+    response_questions = b''.join(encode_domain_name(q[0]) + struct.pack('!HH', q[1], q[2]) for q in questions)
+    response_answers = b''
+    for domain, atype, aclass, ttl, rdata in answers:
+        response_answers += encode_domain_name(domain) + struct.pack('!HHIH', atype, aclass, ttl, len(rdata)) + rdata
+    
+    return response_header + response_questions + response_answers
+
 def forward_dns_query(resolver, query):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.sendto(query, resolver)
@@ -69,30 +87,19 @@ def main(resolver_address):
         
         id = header[0]
         opcode = header[2]
-        all_answers = []
         
-        for domain, qtype, qclass in questions:
-            query = create_query(id, domain, qtype, opcode)
-            forwarded_response = forward_dns_query(resolver, query)
-            _, _, answers = parse_dns_packet(forwarded_response)
-            all_answers.extend(answers)
-
-        response_flags = 0x8180 | (opcode << 11)  # QR=1, AA=0, TC=0, RD=1, RA=1, Z=0, RCODE=0, and set opcode
-        response_header = struct.pack('!HHHHHH',
-            id,           # ID
-            response_flags,  # Flags
-            len(questions),  # QDCOUNT
-            len(all_answers),  # ANCOUNT
-            0,            # NSCOUNT
-            0             # ARCOUNT
-        )
+        if opcode == 1:  # IQUERY
+            # IQUERY is obsolete, respond with RCODE 4 (Not Implemented)
+            response = create_response(id, opcode, questions, [], rcode=4)
+        else:
+            all_answers = []
+            for domain, qtype, qclass in questions:
+                query = create_query(id, domain, qtype, opcode)
+                forwarded_response = forward_dns_query(resolver, query)
+                _, _, answers = parse_dns_packet(forwarded_response)
+                all_answers.extend(answers)
+            response = create_response(id, opcode, questions, all_answers)
         
-        response_questions = b''.join(encode_domain_name(q[0]) + struct.pack('!HH', q[1], q[2]) for q in questions)
-        response_answers = b''
-        for domain, atype, aclass, ttl, rdata in all_answers:
-            response_answers += encode_domain_name(domain) + struct.pack('!HHIH', atype, aclass, ttl, len(rdata)) + rdata
-        
-        response = response_header + response_questions + response_answers
         sock.sendto(response, addr)
 
 if __name__ == "__main__":
