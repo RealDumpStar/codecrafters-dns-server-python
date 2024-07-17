@@ -26,7 +26,7 @@ def main():
 
             # Construct the response header based on the given specifications
             flags = (1 << 15)  # QR = 1 << 15 (setting the QR bit)
-            opcode = 0b00000001  # Set OPCODE to 1 (standard query)
+            opcode = 0b1000000  # Set OPCODE to 1 (standard query)
             rd = (buf[2] & 0b00000001)  # Extract and mimic the RD bit
             
             if opcode == 0:
