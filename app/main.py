@@ -21,11 +21,23 @@ def main():
         try:
             buf, source = udp_socket.recvfrom(512)
             
+            # Parse the incoming DNS query packet
+            id_bytes = buf[:2]  # Extract the ID from the query packet
+
             # Construct the response header based on the given specifications
-            id_bytes = (1234).to_bytes(2, byteorder='big')
             flags = (1 << 15)  # QR = 1 << 15 (setting the QR bit)
+            opcode = (buf[2] & 0b01111000) >> 3  # Extract and mimic the OPCODE
+            rd = (buf[2] & 0b00000001)  # Extract and mimic the RD bit
+            
+            if opcode == 0:
+                rcode = 0  # Response code 0 (no error) for standard query
+            else:
+                rcode = 4  # Response code 4 (not implemented) for other OPCODEs
+            
+            flags |= (rd << 8)  # Set the RD bit in the flags
+            
             flags_bytes = flags.to_bytes(2, byteorder='big')
-            qdcount_bytes = (1).to_bytes(2, byteorder='big')  # QDCOUNT = 1 (one question)
+            qdcount_bytes = buf[4:6]  # QDCOUNT from the query packet
             ancount_bytes = (1).to_bytes(2, byteorder='big')  # ANCOUNT = 1 (one answer)
             nscount_bytes = (0).to_bytes(2, byteorder='big')
             arcount_bytes = (0).to_bytes(2, byteorder='big')
