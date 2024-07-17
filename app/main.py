@@ -9,6 +9,15 @@ def encode_domain_name(domain):
     encoded_labels.append(b'\x00')  # Null byte to terminate the domain name
     return b''.join(encoded_labels)
 
+def decode_domain_name(data, offset):
+    labels = []
+    while data[offset] != 0:
+        length = data[offset]
+        offset += 1
+        labels.append(data[offset:offset+length].decode('ascii'))
+        offset += length
+    return '.'.join(labels), offset + 1  # Skip the null byte
+
 def main():
     # Debugging logs
     print("Logs from your program will appear here!")
@@ -23,35 +32,36 @@ def main():
             
             # Parse the incoming DNS query packet
             id_bytes = buf[:2]  # Extract the ID from the query packet
+            
+            # Extract flags and other header fields from the query packet
             flags1 = buf[2]
             flags2 = buf[3]
-            
-            # Construct the response header based on the given specifications
-            qr = 1 << 7  # QR = 1
             opcode = (flags1 & 0b01111000) >> 3  # Extract and mimic the OPCODE
-            aa = 0 << 2  # AA = 0
-            tc = 0 << 1  # TC = 0
-            rd = flags1 & 0b00000001  # Extract and mimic the RD bit
+            rd = (flags1 & 0b00000001)  # Extract and mimic the RD bit
+
+            # Construct the response flags
+            qr = 1 << 7  # QR = 1 (response)
+            aa = 0 << 2  # AA = 0 (not authoritative)
+            tc = 0 << 1  # TC = 0 (not truncated)
+            ra = 0 << 7  # RA = 0 (recursion not available)
+            z = 0 << 4   # Z = 0 (reserved)
             
             if opcode == 0:
                 rcode = 0  # Response code 0 (no error) for standard query
             else:
                 rcode = 4  # Response code 4 (not implemented) for other OPCODEs
-            
-            ra = 0 << 7  # RA = 0
-            z = 0 << 4  # Z = 0
-            
+
             flags1 = qr | (opcode << 3) | aa | tc | rd
             flags2 = ra | z | rcode
-            
             flags_bytes = bytes([flags1, flags2])
+
             qdcount_bytes = buf[4:6]  # QDCOUNT from the query packet
             ancount_bytes = (1).to_bytes(2, byteorder='big')  # ANCOUNT = 1 (one answer)
             nscount_bytes = (0).to_bytes(2, byteorder='big')
             arcount_bytes = (0).to_bytes(2, byteorder='big')
             
             # Combine all parts to form the 12-byte header
-            response = (
+            response_header = (
                 id_bytes +
                 flags_bytes +
                 qdcount_bytes +
@@ -60,18 +70,17 @@ def main():
                 arcount_bytes
             )
 
-            # Construct the question section (copy from the request)
-            question_section = buf[12:]
-
-            # Append the question section to the response
-            response += question_section
+            # Parse the question section from the query packet
+            offset = 12  # Question section starts immediately after the 12-byte header
+            domain_name, offset = decode_domain_name(buf, offset)
+            qtype = buf[offset:offset+2]
+            qclass = buf[offset+2:offset+4]
+            question_section = encode_domain_name(domain_name) + qtype + qclass
 
             # Construct the answer section
-            domain_name = "codecrafters.io"
-            encoded_domain_name = encode_domain_name(domain_name)
-            answer_name = encoded_domain_name  # Same as in the question section
-            answer_type = (1).to_bytes(2, byteorder='big')  # Type A record
-            answer_class = (1).to_bytes(2, byteorder='big')  # Class IN (Internet)
+            answer_name = encode_domain_name(domain_name)  # Same as in the question section
+            answer_type = qtype  # Type A record
+            answer_class = qclass  # Class IN (Internet)
             ttl = (60).to_bytes(4, byteorder='big')  # TTL = 60 seconds
             rdlength = (4).to_bytes(2, byteorder='big')  # Length of RDATA field
             ip_address = socket.inet_aton('8.8.8.8')  # Convert IP address to 4-byte format
@@ -79,8 +88,8 @@ def main():
             
             answer_section = answer_name + answer_type + answer_class + ttl + rdlength + rdata
             
-            # Append the answer section to the response
-            response += answer_section
+            # Combine the header, question, and answer sections to form the complete response
+            response = response_header + question_section + answer_section
 
             # Send the response to the source address
             udp_socket.sendto(response, source)
