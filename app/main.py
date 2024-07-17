@@ -15,7 +15,8 @@ def main():
             buf, source = udp_socket.recvfrom(512)
     
             response = b"\x04\xd2\x80" + (b"\x00" * 9)
-            response = bytes([12, 34, 128] + [0] * 9)
+            response = bytes([4, 210, 128] + [0] * 9)
+            response = (1234).to_bytes(2, byteorder='big') + bytes([128]) + bytes(9)
     
             udp_socket.sendto(response, source)
         except Exception as e:
