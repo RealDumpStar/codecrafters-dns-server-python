@@ -13,9 +13,16 @@ def decode_domain_name(data, offset):
     labels = []
     while data[offset] != 0:
         length = data[offset]
-        offset += 1
-        labels.append(data[offset:offset+length].decode('ascii'))
-        offset += length
+        if length & 0xC0 == 0xC0:  # Pointer (compression)
+            pointer = ((length & 0x3F) << 8) | data[offset + 1]
+            decoded_label, _ = decode_domain_name(data, pointer)
+            labels.append(decoded_label)
+            offset += 2
+            return '.'.join(labels), offset
+        else:
+            offset += 1
+            labels.append(data[offset:offset+length].decode('ascii'))
+            offset += length
     return '.'.join(labels), offset + 1  # Skip the null byte
 
 def main():
@@ -56,7 +63,8 @@ def main():
             flags_bytes = bytes([flags1, flags2])
 
             qdcount_bytes = buf[4:6]  # QDCOUNT from the query packet
-            ancount_bytes = (1).to_bytes(2, byteorder='big')  # ANCOUNT = 1 (one answer)
+            qdcount = int.from_bytes(qdcount_bytes, byteorder='big')
+            ancount_bytes = qdcount_bytes  # ANCOUNT = same as QDCOUNT (one answer per question)
             nscount_bytes = (0).to_bytes(2, byteorder='big')
             arcount_bytes = (0).to_bytes(2, byteorder='big')
             
@@ -72,21 +80,34 @@ def main():
 
             # Parse the question section from the query packet
             offset = 12  # Question section starts immediately after the 12-byte header
-            domain_name, offset = decode_domain_name(buf, offset)
-            qtype = buf[offset:offset+2]
-            qclass = buf[offset+2:offset+4]
-            question_section = encode_domain_name(domain_name) + qtype + qclass
-
-            # Construct the answer section
-            answer_name = encode_domain_name(domain_name)  # Same as in the question section
-            answer_type = qtype  # Type A record
-            answer_class = qclass  # Class IN (Internet)
-            ttl = (60).to_bytes(4, byteorder='big')  # TTL = 60 seconds
-            rdlength = (4).to_bytes(2, byteorder='big')  # Length of RDATA field
-            ip_address = socket.inet_aton('8.8.8.8')  # Convert IP address to 4-byte format
-            rdata = ip_address
+            question_sections = []
+            domains = []
             
-            answer_section = answer_name + answer_type + answer_class + ttl + rdlength + rdata
+            for _ in range(qdcount):
+                domain_name, offset = decode_domain_name(buf, offset)
+                qtype = buf[offset:offset+2]
+                qclass = buf[offset+2:offset+4]
+                question_sections.append(encode_domain_name(domain_name) + qtype + qclass)
+                domains.append(domain_name)
+                offset += 4
+
+            question_section = b''.join(question_sections)
+
+            # Construct the answer sections
+            answer_sections = []
+            for domain_name in domains:
+                answer_name = encode_domain_name(domain_name)  # Same as in the question section
+                answer_type = (1).to_bytes(2, byteorder='big')  # Type A record
+                answer_class = (1).to_bytes(2, byteorder='big')  # Class IN (Internet)
+                ttl = (60).to_bytes(4, byteorder='big')  # TTL = 60 seconds
+                rdlength = (4).to_bytes(2, byteorder='big')  # Length of RDATA field
+                ip_address = socket.inet_aton('8.8.8.8')  # Convert IP address to 4-byte format
+                rdata = ip_address
+                
+                answer_section = answer_name + answer_type + answer_class + ttl + rdlength + rdata
+                answer_sections.append(answer_section)
+
+            answer_section = b''.join(answer_sections)
             
             # Combine the header, question, and answer sections to form the complete response
             response = response_header + question_section + answer_section
